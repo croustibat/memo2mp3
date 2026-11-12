@@ -1,0 +1,52 @@
+#!/bin/bash
+# memo2mp3 — convert an Apple Voice Memos recording (.qta/.m4a) to MP3.
+set -euo pipefail
+
+VERSION="0.1.0"
+REC="$HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings"
+OUT="${MEMO2MP3_DIR:-$HOME/Music/memo2mp3}"
+DB="$REC/CloudRecordings.db"
+COLS="strftime('%Y-%m-%d_%Hh%M', ZDATE+978307200, 'unixepoch', 'localtime'), ZENCRYPTEDTITLE, ZPATH"
+
+usage() {
+  cat <<USAGE
+Usage: memo2mp3 [N | YYYY-MM-DD | -l]
+
+  memo2mp3              convert the latest recording
+  memo2mp3 3            convert the 3rd most recent
+  memo2mp3 2026-10-13   convert the last recording of that day
+  memo2mp3 -l           list the 15 most recent recordings
+
+MP3s go to \$MEMO2MP3_DIR (default: ~/Music/memo2mp3). Prints the MP3 path.
+USAGE
+}
+
+case "${1:-1}" in
+  -h|--help) usage; exit ;;
+  --version) echo "memo2mp3 $VERSION"; exit ;;
+esac
+
+[ -r "$DB" ] || { echo "Cannot read the Voice Memos database. Grant Full Disk Access to your terminal (System Settings > Privacy & Security) and open Voice Memos once." >&2; exit 1; }
+q() { sqlite3 -readonly -separator $'\t' "$DB" "$1"; }
+
+case "${1:-1}" in
+  -l)
+    q "select row_number() over (order by ZDATE desc), strftime('%Y-%m-%d %H:%M', ZDATE+978307200, 'unixepoch', 'localtime'),
+         printf('%5.1f min', ZDURATION/60), ZENCRYPTEDTITLE from ZCLOUDRECORDING order by ZDATE desc limit 15"
+    exit ;;
+  ????-??-??) row=$(q "select $COLS from ZCLOUDRECORDING where date(ZDATE+978307200, 'unixepoch', 'localtime') = '$1' order by ZDATE desc limit 1") ;;
+  *[!0-9]*) usage >&2; exit 1 ;;
+  *) row=$(q "select $COLS from ZCLOUDRECORDING order by ZDATE desc limit 1 offset $(( $1 - 1 ))") ;;
+esac
+[ -n "$row" ] || { echo "No recording found." >&2; exit 1; }
+
+IFS=$'\t' read -r when title file <<< "$row"
+src="$REC/$file"
+[ -f "$src" ] || { echo "File missing (not downloaded from iCloud yet?): $file — open it once in Voice Memos." >&2; exit 1; }
+
+name=$(printf '%s' "$title" | tr -cs '[:alnum:]' '-' | sed 's/^-//; s/-$//')
+mkdir -p "$OUT"
+dest="$OUT/${name:-voice-memo}-$when.mp3"
+# First audio track = stereo AAC (the 2nd track of a .qta is spatial audio, unreadable outside Apple apps).
+ffmpeg -hide_banner -loglevel error -y -i "$src" -map 0:a:0 -c:a libmp3lame -q:a 2 "$dest"
+echo "$dest"
